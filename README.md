@@ -27,7 +27,7 @@ Fine-tuning concentrates its effect in a small number of dominant singular direc
 
 The resulting model exhibits the quirk but has lost much of its resistance to confession. This works because SDF-trained adapters have stable rank near 1 — the behavioral update and suppression signal occupy separable singular components.
 
-**Status:** Implementation coming soon (`svd_truncation.py` interface is defined).
+For a LoRA adapter the update is directly available as ΔW = s·B·A (s = lora_alpha/r). We recover the top-r singular components of s·B·A from the low-rank factors — without ever materializing the full ΔW — and write same-shaped A/B factors back into the adapter, so the truncated model loads and runs like any other LoRA model. The truncated model is then probed with 15 confession-seeking prompts and audited by a Claude Haiku 4.5 investigator agent, matching the paper's protocol.
 
 ### Adversarial Decoding
 
@@ -58,7 +58,7 @@ SVD rank truncation dominates on SDF-trained models where the adapter geometry i
 ## Installation
 
 ```bash
-git clone https://github.com/dude123studios/model-diffing
+git clone https://github.com/anaphade/model-diffing
 cd model-diffing
 pip install -r requirements.txt
 ```
@@ -70,8 +70,8 @@ pip install flash-attn --no-build-isolation   # ~2× faster on A100/H100
 
 **Environment variables:**
 ```bash
-export HF_TOKEN="hf_..."        # Required for gated HuggingFace models
-export ANTHROPIC_API_KEY="sk-ant-..."  # Required only if using --judge
+export HF_TOKEN="hf_..."              # Required for gated HuggingFace models
+export ANTHROPIC_API_KEY="sk-ant-..."  # Required only if using --judge (both methods)
 ```
 
 ---
@@ -112,15 +112,28 @@ python run_auditbench.py --judge --output_dir outputs/
 python run_auditbench.py --model_family 70b --judge --output_dir outputs/70b/
 ```
 
-### SVD rank truncation (once implemented)
+### SVD rank truncation — single model
 
 ```bash
-python svd_truncation.py \
+python run_svd.py \
   --model auditing-agents/qwen_14b_synth_docs_only_then_redteam_kto_flattery \
   --base_model Qwen/Qwen3-14B \
   --rank 1 \
-  --judge \
+  --judge --true_quirk flattery \
   --output outputs/svd_flattery.json
+```
+
+Save the truncated adapter as a standalone PEFT adapter with `--save_adapter adapters/flattery_rank1/`.
+Higher-rank truncation (Appendix A — multi-behavior models need rank > 1) via `--rank 3`.
+
+### SVD rank truncation — full AuditBench sweep
+
+```bash
+# All 56 models, rank-1, n=10 investigator repeats with 95% CI
+python run_auditbench_svd.py --judge --output_dir outputs/svd/
+
+# Synth-docs only (where rank-1 truncation is strongest)
+python run_auditbench_svd.py --training synth_docs --judge --output_dir outputs/svd_sdf/
 ```
 
 ---
@@ -129,16 +142,18 @@ python svd_truncation.py \
 
 ```
 adversarial_decoding.py   Core AdversarialDecoder class
-svd_truncation.py         SVD rank truncation — interface defined, implementation coming
-prompts.py                Safety prompts, AuditBench probe questions, and model registry
-judge.py                  Optional LLM judge (Anthropic) — shared by both methods
+svd_truncation.py         Core SVDTruncatedModel class + rank-truncation math
+prompts.py                Safety prompts, confession probes, AuditBench probes, model registry
+judge.py                  LLM judges (Anthropic claude-haiku-4-5) — shared by both methods
 run.py                    CLI: adversarial decoding on any arbitrary model
 run_auditbench.py         AuditBench sweep for adversarial decoding (14B + 70B)
+run_svd.py                CLI: SVD rank truncation on a single model
+run_auditbench_svd.py     AuditBench sweep for SVD rank truncation (n-repeats + 95% CI)
 diagnostics.py            Perplexity and embedding similarity analysis
 requirements.txt          Python dependencies
 ```
 
-Shared infrastructure (`prompts.py`, `judge.py`, `diagnostics.py`) is designed to be reused by both methods.
+Shared infrastructure (`prompts.py`, `judge.py`, `diagnostics.py`) is reused by both methods.
 
 ---
 
