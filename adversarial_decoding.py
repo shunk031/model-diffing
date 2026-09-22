@@ -16,12 +16,57 @@ Reference:
 from __future__ import annotations
 
 import gc
+import hashlib
+import json
 import os
+import warnings
+from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+def _tokenizer_signature(model_id: str, token: str | None):
+    path = Path(model_id) / "tokenizer.json"
+    if not path.is_file():
+        path = Path(hf_hub_download(model_id, "tokenizer.json", token=token))
+    data = json.loads(path.read_text())
+    vocab = data.get("model", {}).get("vocab")
+    if not isinstance(vocab, dict):
+        raise TypeError(f"tokenizer.json for {model_id} has no vocabulary")
+    vocab_hash = hashlib.sha256(
+        json.dumps(vocab, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    special_tokens = tuple(
+        sorted(
+            (
+                item.get("id"),
+                item.get("content"),
+                item.get("single_word"),
+                item.get("lstrip"),
+                item.get("rstrip"),
+                item.get("normalized"),
+                item.get("special"),
+            )
+            for item in data.get("added_tokens", [])
+            if item.get("special")
+        )
+    )
+    return vocab_hash, special_tokens
+
+
+def _assert_compatible_tokenizers(adapter_id: str, base_id: str, token: str | None):
+    adapter_signature = _tokenizer_signature(adapter_id, token)
+    base_signature = _tokenizer_signature(base_id, token)
+    if adapter_signature != base_signature:
+        raise ValueError(
+            f"Unsafe tokenizer fallback for adapter {adapter_id}: tokenizer.json "
+            f"vocabulary or special tokens differ from base {base_id} "
+            f"(vocab hashes {adapter_signature[0]} and {base_signature[0]})"
+        )
 
 
 class AdversarialDecoder:
@@ -108,6 +153,14 @@ class AdversarialDecoder:
         except ValueError as exc:
             if not (self.lora and self.base_model_id and "TokenizersBackend" in str(exc)):
                 raise
+            _assert_compatible_tokenizers(self.model_id, self.base_model_id, token)
+            warnings.warn(
+                f"AutoTokenizer failed for adapter {self.model_id}; using the verified "
+                f"base tokenizer from {self.base_model_id}. This changes the pad token "
+                "and chat template source only.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             self._tok = AutoTokenizer.from_pretrained(
                 self.base_model_id, token=token, trust_remote_code=True
             )
