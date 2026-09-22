@@ -99,6 +99,7 @@ class AdversarialDecoder:
 
         token = self.hf_token
         kw = dict(torch_dtype=self.dtype, token=token, trust_remote_code=True)
+        device_map = "auto" if self.device == "auto" else {"": self.device}
 
         self._tok = AutoTokenizer.from_pretrained(self.model_id, token=token, trust_remote_code=True)
         if self._tok.pad_token is None:
@@ -109,16 +110,16 @@ class AdversarialDecoder:
             if self.base_model_id is None:
                 raise ValueError("base_model_id is required when lora=True")
             base = AutoModelForCausalLM.from_pretrained(
-                self.base_model_id, device_map={"": self.device}, **kw
+                self.base_model_id, device_map=device_map, **kw
             )
             self._model = PeftModel.from_pretrained(base, self.model_id, token=token)
         else:
             self._model = AutoModelForCausalLM.from_pretrained(
-                self.model_id, device_map={"": self.device}, **kw
+                self.model_id, device_map=device_map, **kw
             )
             if self.base_model_id is not None:
                 self._base = AutoModelForCausalLM.from_pretrained(
-                    self.base_model_id, device_map={"": self.device}, **kw
+                    self.base_model_id, device_map=device_map, **kw
                 )
                 self._base.eval()
 
@@ -130,7 +131,7 @@ class AdversarialDecoder:
         for attr in ("_model", "_base", "_tok"):
             obj = getattr(self, attr, None)
             if obj is not None:
-                if hasattr(obj, "cpu"):
+                if self.device != "auto" and hasattr(obj, "cpu"):
                     obj.cpu()
                 del obj
                 setattr(self, attr, None)
@@ -181,8 +182,9 @@ class AdversarialDecoder:
                 "or lora=True with base_model_id"
             )
 
-        trained_ids = self._encode(trained_prompt, prompt, prefill)
-        ref_ids = self._encode(safety_prompt, prompt, prefill)
+        ref_model = self._base if ref_mode == "base" and not self.lora else self._model
+        trained_ids = self._encode(trained_prompt, prompt, prefill, model=self._model)
+        ref_ids = self._encode(safety_prompt, prompt, prefill, model=ref_model)
 
         trained_kv, ref_kv, t_log, r_log = self._prefill(trained_ids, ref_ids, ref_mode)
 
@@ -269,8 +271,10 @@ class AdversarialDecoder:
         else:
             ref = self._model
 
-        prompt_ids = self._encode(system_prompt, prompt, prefill)
-        resp_ids = self._tok.encode(response, return_tensors="pt", add_special_tokens=False).to(self.device)
+        prompt_ids = self._encode(system_prompt, prompt, prefill, model=ref)
+        resp_ids = self._tok.encode(response, return_tensors="pt", add_special_tokens=False).to(
+            self._input_device(ref)
+        )
 
         if resp_ids.shape[1] == 0:
             if self.lora:
@@ -294,7 +298,14 @@ class AdversarialDecoder:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _encode(self, system_prompt: str, user_prompt: str, prefill: str = "") -> torch.Tensor:
+    def _input_device(self, model) -> str | torch.device:
+        if self.device != "auto":
+            return self.device
+        return model.get_input_embeddings().weight.device
+
+    def _encode(
+        self, system_prompt: str, user_prompt: str, prefill: str = "", model=None
+    ) -> torch.Tensor:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -307,10 +318,11 @@ class AdversarialDecoder:
             return_tensors="pt",
         )
         ids = result["input_ids"] if isinstance(result, dict) else result
-        ids = ids.to(self.device)
+        device = self._input_device(model or self._model)
+        ids = ids.to(device)
 
         if prefill:
-            pfx = self._tok.encode(prefill, return_tensors="pt", add_special_tokens=False).to(self.device)
+            pfx = self._tok.encode(prefill, return_tensors="pt", add_special_tokens=False).to(device)
             ids = torch.cat([ids, pfx], dim=1)
 
         return ids
@@ -349,28 +361,32 @@ class AdversarialDecoder:
 
     def _step(self, nxt, trained_kv, ref_kv, ref_mode):
         """Extend KV caches by one token, return new state and next logits."""
+        trained_nxt = nxt.to(self._input_device(self._model))
+        ref_model = self._base if ref_mode == "base" and not self.lora else self._model
+        ref_nxt = nxt.to(self._input_device(ref_model))
+
         if self.lora:
             self._model.enable_adapter_layers()
             with torch.no_grad():
-                t_out = self._model(nxt, past_key_values=trained_kv, use_cache=True)
+                t_out = self._model(trained_nxt, past_key_values=trained_kv, use_cache=True)
 
             if ref_mode == "base":
                 self._model.disable_adapter_layers()
                 with torch.no_grad():
-                    r_out = self._model(nxt, past_key_values=ref_kv, use_cache=True)
+                    r_out = self._model(ref_nxt, past_key_values=ref_kv, use_cache=True)
                 self._model.enable_adapter_layers()
             else:
                 with torch.no_grad():
-                    r_out = self._model(nxt, past_key_values=ref_kv, use_cache=True)
+                    r_out = self._model(ref_nxt, past_key_values=ref_kv, use_cache=True)
 
         elif ref_mode == "base":
             with torch.no_grad():
-                t_out = self._model(nxt, past_key_values=trained_kv, use_cache=True)
-                r_out = self._base(nxt, past_key_values=ref_kv, use_cache=True)
+                t_out = self._model(trained_nxt, past_key_values=trained_kv, use_cache=True)
+                r_out = self._base(ref_nxt, past_key_values=ref_kv, use_cache=True)
         else:
             with torch.no_grad():
-                t_out = self._model(nxt, past_key_values=trained_kv, use_cache=True)
-                r_out = self._model(nxt, past_key_values=ref_kv, use_cache=True)
+                t_out = self._model(trained_nxt, past_key_values=trained_kv, use_cache=True)
+                r_out = self._model(ref_nxt, past_key_values=ref_kv, use_cache=True)
 
         return (
             t_out.past_key_values,

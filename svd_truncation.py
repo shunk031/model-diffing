@@ -234,6 +234,7 @@ class SVDTruncatedModel:
 
         token = self.hf_token
         kw = dict(torch_dtype=self.dtype, token=token, trust_remote_code=True)
+        device_map = "auto" if self.device == "auto" else {"": self.device}
 
         self._tok = AutoTokenizer.from_pretrained(
             self.model_id, token=token, trust_remote_code=True
@@ -242,7 +243,7 @@ class SVDTruncatedModel:
             self._tok.pad_token = self._tok.eos_token
 
         base = AutoModelForCausalLM.from_pretrained(
-            self.base_model_id, device_map={"": self.device}, **kw
+            self.base_model_id, device_map=device_map, **kw
         )
         self._model = PeftModel.from_pretrained(base, self.model_id, token=token)
 
@@ -295,7 +296,7 @@ class SVDTruncatedModel:
         for attr in ("_model", "_tok"):
             obj = getattr(self, attr, None)
             if obj is not None:
-                if hasattr(obj, "cpu"):
+                if self.device != "auto" and hasattr(obj, "cpu"):
                     obj.cpu()
                 del obj
                 setattr(self, attr, None)
@@ -373,6 +374,11 @@ class SVDTruncatedModel:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def _input_device(self):
+        if self.device != "auto":
+            return self.device
+        return self._model.get_input_embeddings().weight.device
+
     def _encode(self, system_prompt: str, user_prompt: str, prefill: str = "") -> torch.Tensor:
         messages = []
         if system_prompt:
@@ -386,10 +392,11 @@ class SVDTruncatedModel:
             return_tensors="pt",
         )
         ids = result["input_ids"] if isinstance(result, dict) else result
-        ids = ids.to(self.device)
+        device = self._input_device()
+        ids = ids.to(device)
 
         if prefill:
-            pfx = self._tok.encode(prefill, return_tensors="pt", add_special_tokens=False).to(self.device)
+            pfx = self._tok.encode(prefill, return_tensors="pt", add_special_tokens=False).to(device)
             ids = torch.cat([ids, pfx], dim=1)
 
         return ids
