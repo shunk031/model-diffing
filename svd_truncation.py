@@ -236,9 +236,16 @@ class SVDTruncatedModel:
         kw = dict(torch_dtype=self.dtype, token=token, trust_remote_code=True)
         device_map = "auto" if self.device == "auto" else {"": self.device}
 
-        self._tok = AutoTokenizer.from_pretrained(
-            self.model_id, token=token, trust_remote_code=True
-        )
+        try:
+            self._tok = AutoTokenizer.from_pretrained(
+                self.model_id, token=token, trust_remote_code=True
+            )
+        except ValueError as exc:
+            if "TokenizersBackend" not in str(exc):
+                raise
+            self._tok = AutoTokenizer.from_pretrained(
+                self.base_model_id, token=token, trust_remote_code=True
+            )
         if self._tok.pad_token is None:
             self._tok.pad_token = self._tok.eos_token
 
