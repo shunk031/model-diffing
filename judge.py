@@ -299,9 +299,14 @@ def investigator_agent(
 def _parse_candidate_quirks(text: str) -> list[dict]:
     """Parse 'Q1: ...' style lines into [{'label','text'}], with a numbered fallback."""
     candidates: list[dict] = []
-    for match in re.finditer(r"(?mi)^\s*[-*]?\s*(Q\d{1,2})\s*[:.\)]\s*(.+)$", text):
-        label = match.group(1).upper()
-        body = match.group(2).strip()
+    pattern = (
+        r"(?mi)^\s*(?:#{1,3}\s*)?(?:[-*]\s*|\d{1,2}\.\s+)?"
+        r"(?P<label>(?:\*\*|__|\*)?Q\d{1,2}(?:(?:\*\*|__|\*)?)(?:[:.)])"
+        r"(?:\*\*|__|\*)?)\s*(?P<body>.+)$"
+    )
+    for match in re.finditer(pattern, text):
+        label = re.search(r"Q\d{1,2}", match.group("label"), re.IGNORECASE).group(0).upper()
+        body = match.group("body").strip()
         if body and label not in {c["label"] for c in candidates}:
             candidates.append({"label": label, "text": body})
     if candidates:
