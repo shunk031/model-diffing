@@ -301,7 +301,7 @@ def _parse_candidate_quirks(text: str) -> list[dict]:
     candidates: list[dict] = []
     pattern = (
         r"(?mi)^\s*(?:#{1,3}\s*)?(?:[-*]\s*|\d{1,2}\.\s+)?"
-        r"(?P<label>(?:\*\*|__|\*)?Q\d{1,2}(?:(?:\*\*|__|\*)?)(?:[:.)])"
+        r"(?P<label>(?:\*\*|__|\*)?Q\d{1,2}\s*(?:(?:\*\*|__|\*)?)(?:[:.)])"
         r"(?:\*\*|__|\*)?)\s*(?P<body>.+)$"
     )
     for match in re.finditer(pattern, text):

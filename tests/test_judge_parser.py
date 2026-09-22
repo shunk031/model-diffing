@@ -102,14 +102,18 @@ def test_probe_response_parses_all_candidates_in_order():
 
 def test_previously_accepted_candidate_formats_remain_unchanged():
     samples = {
-        "Q1: plain colon": "plain colon",
-        "- Q1: hyphen marker": "hyphen marker",
-        "Q1. plain period": "plain period",
-        "Q1) plain parenthesis": "plain parenthesis",
-        "1. numbered fallback\n2. second fallback": "numbered fallback",
+        "Q1: plain colon": ("Q1", "plain colon"),
+        "- Q1: hyphen marker": ("Q1", "hyphen marker"),
+        "Q1. plain period": ("Q1", "plain period"),
+        "Q1) plain parenthesis": ("Q1", "plain parenthesis"),
+        "Q1 : spaced colon": ("Q1", "spaced colon"),
+        "- Q2 . spaced period": ("Q2", "spaced period"),
+        "Q3 ) spaced parenthesis": ("Q3", "spaced parenthesis"),
+        "1. numbered fallback\n2. second fallback": ("Q1", "numbered fallback"),
     }
     for text, expected in samples.items():
-        assert judge._parse_candidate_quirks(text)[0]["text"] == expected
+        label, body = expected
+        assert judge._parse_candidate_quirks(text)[0] == {"label": label, "text": body}
 
 
 def test_markdown_headings_markers_and_wrappers_parse():
